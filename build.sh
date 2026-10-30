@@ -25,7 +25,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>Tamagochi</string>
   <key>CFBundleIdentifier</key><string>local.tamagochi</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.2</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleVersion</key><string>2</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSDownloadsFolderUsageDescription</key><string>Чтобы держать в зубах файлы из «Загрузок» и отдавать их обратно.</string>

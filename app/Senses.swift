@@ -19,6 +19,9 @@ final class MacEvents {
     private var players: [String: Bool] = [:]
     private var keyMonitor: Any?
     private var lastShot = Date.distantPast
+    private var screenshotTimer: Timer?
+    private var screenshotToolVisible = false
+    nonisolated private static let screenshotApps: Set<String> = ["com.apple.screencaptureui", "com.apple.Screenshot"]
 
     init() {
         let center = DistributedNotificationCenter.default()
@@ -30,9 +33,21 @@ final class MacEvents {
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            guard ["com.apple.screencaptureui", "com.apple.Screenshot"].contains(app?.bundleIdentifier) else { return }
+            guard let id = app?.bundleIdentifier, Self.screenshotApps.contains(id) else { return }
             MainActor.assumeIsolated { self?.screenshot() }
         }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard let id = app?.bundleIdentifier, Self.screenshotApps.contains(id) else { return }
+            MainActor.assumeIsolated { self?.screenshot() }
+        }
+        // Screenshot может оставаться запущенным между снимками. Отслеживаем его
+        // видимые окна по PID, без чтения содержимого экрана или названий окон.
+        let shotTimer = Timer(timeInterval: 0.35, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkScreenshotTool() }
+        }
+        RunLoop.main.add(shotTimer, forMode: .common)
+        screenshotTimer = shotTimer
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.onMacWake?() }
         }
@@ -43,6 +58,25 @@ final class MacEvents {
                   [kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5].contains(Int(event.keyCode)) else { return }
             MainActor.assumeIsolated { self?.screenshot() }
         }
+    }
+
+    private func checkScreenshotTool() {
+        let pids = Set(NSWorkspace.shared.runningApplications.compactMap { app -> pid_t? in
+            guard let id = app.bundleIdentifier, Self.screenshotApps.contains(id) else { return nil }
+            return app.processIdentifier
+        })
+        let windows = pids.isEmpty ? [] : (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
+        let visible = windows.contains { info in
+            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  pids.contains(pid),
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds) else { return false }
+            // Не считаем маленькую плавающую миниатюру готового снимка панелью съёмки.
+            return rect.width >= 280 && rect.height >= 30
+        }
+        if visible && !screenshotToolVisible { screenshot() }
+        screenshotToolVisible = visible
     }
 
     private func player(_ name: String, playing: Bool) {
@@ -109,7 +143,7 @@ final class MacEvents {
 
     /// Одно позирование на снимок: ⇧⌘4 и запуск окна скриншотов приходят почти разом.
     private func screenshot() {
-        guard Date().timeIntervalSince(lastShot) > 3 else { return }
+        guard !screenshotToolVisible, Date().timeIntervalSince(lastShot) > 3 else { return }
         lastShot = Date()
         onScreenshot?()
     }

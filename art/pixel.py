@@ -1,16 +1,17 @@
 """Маленький движок пиксель-арта: слои с автообводкой, сборка спрайт-листов и превью.
 
-Позы размечены в клетках сетки 32×32 (так их удобно двигать), а рисуются в пикселях 48×48:
+Позы размечены в клетках сетки 32×32 (так их удобно двигать), а рисуются в пикселях 128×128:
 каждая фигура растеризуется заново, поэтому скругления плавные, лапы — ровные наклонные полосы.
-Мелочи мордочки рисуются прямо в пикселях."""
+Мимика использует отдельную разметку 48×48, детали рисуются в полном разрешении."""
 from math import ceil, floor
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 OUTLINE = (43, 29, 26, 255)
 GROUND = 30  # нижний ряд заливки в клетках; обводка лапок ложится под ним
-S = 1.5  # пикселей на клетку
-SIZE = 48
+S = 4  # пикселей на клетку; геометрия растеризуется сразу в полном разрешении
+SIZE = 128
+FACE_SCALE = SIZE / 48  # отдельная, историческая система координат мимики
 
 # Цикл ходьбы, общий для всех четвероногих: (ближние, дальние, bob).
 # Лапы — (x, dx, lift) для задней и передней. Поднимается та лапа, что была сзади:
@@ -47,10 +48,10 @@ def zzz(sprite, frame):
         x, y = path[phase]
         z = Layer((255, 255, 255, 255))
         for dx in range(5):
-            z.set(x + dx, y)
-            z.set(x + dx, y + 4)
+            z.rect((x + dx) / 1.5, y / 1.5, (x + dx + 1) / 1.5 - 1, (y + 1) / 1.5 - 1)
+            z.rect((x + dx) / 1.5, (y + 4) / 1.5, (x + dx + 1) / 1.5 - 1, (y + 5) / 1.5 - 1)
         for d in (1, 2, 3):
-            z.set(x + 4 - d, y + d)
+            z.rect((x + 4 - d) / 1.5, (y + d) / 1.5, (x + 5 - d) / 1.5 - 1, (y + d + 1) / 1.5 - 1)
         sprite.draw(z)
 
 
@@ -137,7 +138,7 @@ class Layer:
         self.px[(x, y)] = c or self.color
 
     def cell(self, x, y, c=None):
-        """Одна клетка разметки — пиксель-другой."""
+        """Одна клетка разметки."""
         self.rect(x, y, x, y, c)
 
     def rect(self, x0, y0, x1, y1, c=None):
@@ -177,6 +178,24 @@ class Layer:
                     inside = not inside
             if inside:
                 self.set(px, py, c)
+
+
+def sitting_body(layer):
+    """Единый грушевидный силуэт: плавная спина от шеи к тазу, без ступеньки."""
+    curves = [
+        ((19, 15), (14, 15), (5.5, 22), (5.5, 27)),
+        ((5.5, 27), (5.5, 30), (8, 31), (12, 31)),
+        ((12, 31), (16, 31), (19, 29), (21, 27)),
+        ((21, 27), (22, 23), (22, 19), (22, 17)),
+        ((22, 17), (22, 15.5), (20.5, 15), (19, 15)),
+    ]
+    points = []
+    for a, b, c, d in curves:
+        for step in range(20):
+            t = step / 20
+            points.append(tuple((1-t)**3*a[i] + 3*(1-t)**2*t*b[i]
+                                + 3*(1-t)*t*t*c[i] + t**3*d[i] for i in (0, 1)))
+    layer.poly(points)
 
 
 def legs(layer, specs, top):
@@ -220,21 +239,73 @@ class Sprite:
         for x, y in points:
             self.put(x + dx, y + dy, c)
 
+    def details(self, points, c, dx=0, dy=0):
+        """Разметка мимики 48×48, независимая от разрешения текстуры."""
+        draw = ImageDraw.Draw(self.img)
+        for x, y in points:
+            draw.rectangle((round((x + dx) * FACE_SCALE), round((y + dy) * FACE_SCALE),
+                            round((x + dx + 1) * FACE_SCALE) - 1,
+                            round((y + dy + 1) * FACE_SCALE) - 1), fill=c)
+
+    def line(self, points, c, width=0.25):
+        """Тонкая линия в клетках позы, без масштабирования готовых пикселей."""
+        ImageDraw.Draw(self.img).line([(round(x * S), round(y * S)) for x, y in points],
+                                     fill=c, width=max(1, round(width * S)), joint="curve")
+
+    def oval(self, box, c):
+        ImageDraw.Draw(self.img).ellipse(tuple(round(v * S) for v in box), fill=c)
+
+    def paws(self, points, c):
+        self.dots(points, c)
+        # Две короткие бороздки на каждой видимой стопе.
+        rows = {}
+        for x, y in points:
+            rows.setdefault(y, []).append(x)
+        if not rows:
+            return
+        bottom = max(rows)
+        xs = sorted(rows[bottom])
+        groups = []
+        for x in xs:
+            if not groups or x > groups[-1][-1] + 1:
+                groups.append([])
+            groups[-1].append(x)
+        for group in groups:
+            for fraction in (0.33, 0.67):
+                x = group[min(len(group) - 1, round((len(group) - 1) * fraction))]
+                for y in (bottom - 1, bottom):
+                    if (x, y) in points:
+                        self.put(x, y, tint(c, 0.7))
+
     def draw(self, layer, outline=True):
-        """С обводкой — ещё и объём: блик по верхнему краю, тень на два пикселя снизу,
-        а обводка — тёмный оттенок того, что обводит, а не везде одна и та же."""
+        """Цветная обводка, ступенчатый свет, контактная тень и короткие пряди шерсти."""
         px = layer.px
+        if not px:
+            return
+        min_x = min(x for x, _ in px)
+        min_y = min(y for _, y in px)
+        max_y = max(y for _, y in px)
+        edge = max(1, round(S * 0.45))
         if outline:
             for (x, y), c in px.items():
-                for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                    if (nx, ny) not in px:
-                        self.put(nx, ny, rim(c))
+                for distance in range(1, edge + 1):
+                    for nx, ny in ((x + distance, y), (x - distance, y), (x, y + distance), (x, y - distance)):
+                        if (nx, ny) not in px:
+                            self.put(nx, ny, rim(c))
         for (x, y), c in px.items():
             if outline:
-                if (x, y - 1) not in px:
-                    c = tint(c, 1.14)
-                elif (x, y + 1) not in px or (x, y + 2) not in px:
-                    c = tint(c, 0.86)
+                # Ступенчатая палитра сохраняет пиксельный характер и даёт объём.
+                height = (y - min_y) / max(1, max_y - min_y)
+                k = (1.10, 1.04, 1.0, 0.96, 0.90)[min(4, int(height * 5))]
+                if (x, y - edge) not in px:
+                    k = 1.18
+                elif (x, y + edge * 2) not in px:
+                    k = 0.81
+                # Редкие короткие пряди привязаны к слою, поэтому не мерцают при подскоке.
+                u, v = x - min_x, y - min_y
+                if c[0] > c[1] > c[2] and (u % 13 in (3, 4) and v % 11 in (4, 5, 6)):
+                    k *= 1.06 if (u // 13 + v // 11) % 2 else 0.94
+                c = tint(c, k)
             self.put(x, y, c)
 
 
@@ -252,12 +323,12 @@ def _on_bg(img, bg, scale):
     return base.resize((img.width * scale, img.height * scale), Image.NEAREST).convert("RGB")
 
 
-def save_gif(frames, path, ms=150, scale=8, bg=(244, 239, 230, 255)):
+def save_gif(frames, path, ms=150, scale=3, bg=(244, 239, 230, 255)):
     imgs = [_on_bg(f.img, bg, scale) for f in frames]
     imgs[0].save(path, save_all=True, append_images=imgs[1:], duration=ms, loop=0, disposal=2)
 
 
-def save_board(rows, path, scale=8, bg=(244, 239, 230, 255), gap=2):
+def save_board(rows, path, scale=1, bg=(244, 239, 230, 255), gap=8):
     """Статичная доска: каждая строка — анимация, кадры слева направо."""
     w, h = rows[0][0].img.size
     cols = max(len(r) for r in rows)
@@ -268,7 +339,7 @@ def save_board(rows, path, scale=8, bg=(244, 239, 230, 255), gap=2):
     board.resize((board.width * scale, board.height * scale), Image.NEAREST).save(path)
 
 
-def save_scene(walk, idle, path, width=144, step=2, ms=140, scale=4, bg=(244, 239, 230, 255)):
+def save_scene(walk, idle, path, width=384, step=5, ms=140, scale=2, bg=(244, 239, 230, 255)):
     """Питомец идёт вправо, стоит, идёт обратно — проверка движения и зеркалирования."""
     w, h = walk[0].img.size
     shots = []  # (кадр, x, смотрит влево)

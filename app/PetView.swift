@@ -7,6 +7,19 @@ import AppKit
 final class PetView: NSView, NSDraggingSource {
     weak var pet: Pet?
     var menuProvider: (() -> NSMenu)?
+    var coat: PetCoat = .original {
+        didSet {
+            if coat != oldValue { clearAppearanceCache() }
+        }
+    }
+    var spriteOpacity: CGFloat = 1 { didSet { needsDisplay = true } }
+    // Сохраняем и исходник: его ObjectIdentifier не переиспользуется для другого кадра.
+    private var paintedFrames: [ObjectIdentifier: (source: CGImage, result: CGImage)] = [:]
+
+    func clearAppearanceCache() {
+        paintedFrames.removeAll()
+        needsDisplay = true
+    }
 
     /// Файлы в зубах; иконка первого рисуется у рта.
     var held: [URL] = [] {
@@ -81,7 +94,17 @@ final class PetView: NSView, NSDraggingSource {
             ctx.translateBy(x: bounds.width, y: 0)
             ctx.scaleBy(x: -1, y: 1)
         }
-        ctx.draw(image, in: bounds)
+        let painted: CGImage
+        if coat == .original {
+            painted = image
+        } else if let cached = paintedFrames[ObjectIdentifier(image)] {
+            painted = cached.result
+        } else {
+            painted = coat.render(image)
+            paintedFrames[ObjectIdentifier(image)] = (image, painted)
+        }
+        ctx.setAlpha(spriteOpacity)
+        ctx.draw(painted, in: bounds)
         ctx.restoreGState()
 
         guard let heldIcon, !fileOut else { return }

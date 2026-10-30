@@ -21,6 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var busy = false
     private var menuOpen = false
     private var statusItem: NSStatusItem!
+    private var settingsWindow: SettingsWindow?
+    private var musicEnabled: Bool { defaults.object(forKey: "musicEnabled") as? Bool ?? true }
+    private var screenshotsEnabled: Bool { defaults.object(forKey: "screenshotsEnabled") as? Bool ?? true }
 
     /// Точек экрана на пиксель спрайта 48×48: на Retina это ровно 3, 4 и 5 точек экрана.
     private let sizes: [(String, CGFloat)] = [("Маленький", 1.5), ("Средний", 2), ("Большой", 2.5)]
@@ -28,8 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let species = Species(rawValue: defaults.string(forKey: "species") ?? "") ?? .cat
         // Размер из времён спрайтов 32×32 переводим в тот же размер на экране
-        let stored = defaults.double(forKey: "scale48")
-        let scale = stored > 0 ? stored : [2: 1.5, 3: 2, 4: 2.5][defaults.double(forKey: "scale")] ?? 2
+        let scale = CGFloat(PetPreferences.load(defaults).scale)
         pet = Pet(species: species, scale: scale, ball: ball)
         pet.view.menuProvider = { [unowned self] in contextMenu() }
         pet.blocksEnabled = defaults.object(forKey: "blocks") as? Bool ?? true
@@ -52,8 +54,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Pet.requestAccess(to: pet.held)
         pet.onHeldChange = { [unowned self] held in heldChanged(held) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [unowned self] in chatter.greet() }
-        events.onMusic = { [unowned self] playing in pets.forEach { $0.musicPlaying = playing } }
+        events.onMusic = { [unowned self] playing in pets.forEach { $0.musicPlaying = playing && musicEnabled } }
         events.onScreenshot = { [unowned self] in
+            guard screenshotsEnabled else { return }
             pets.forEach { $0.poseForPhoto() }
             chatter.say("Сыр! 📸")
         }
@@ -68,12 +71,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         pet.onSay = { [unowned pet] text in pet.say(Chatter.plain(text)) }
         if defaults.bool(forKey: "duo") { setDuo(true) }
+        applyPreferences(preferences)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "pawprint.fill", accessibilityDescription: "Тамагочи")
         let menu = NSMenu()
         menu.delegate = self  // пересобираем при каждом открытии: доступ могли выдать, пока меню было закрыто
         statusItem.menu = menu
+
+        // Главное меню даёт обычному окну стандартные сочетания клавиш macOS.
+        let mainMenu = NSMenu()
+        let applicationMenu = NSMenu()
+        let settings = item("Настройки…", #selector(openSettings))
+        settings.keyEquivalent = ","
+        applicationMenu.addItem(settings)
+        applicationMenu.addItem(.separator())
+        applicationMenu.addItem(NSMenuItem(title: "Завершить Тамагочи", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let applicationItem = NSMenuItem()
+        applicationItem.submenu = applicationMenu
+        mainMenu.addItem(applicationItem)
+        let windowMenu = NSMenu(title: "Окно")
+        windowMenu.addItem(NSMenuItem(title: "Закрыть окно", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        windowMenu.addItem(NSMenuItem(title: "Свернуть", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        let windowItem = NSMenuItem(title: "Окно", action: nil, keyEquivalent: "")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+        if CommandLine.arguments.contains("--settings") { openSettings() }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettings()
+        return true
+    }
+
+    private var preferences: PetPreferences {
+        var value = PetPreferences.load(defaults)
+        value.selection = companion != nil ? "duo" : pet.species.rawValue
+        value.scale = Double(pet.scale)
+        value.blocks = pet.blocksEnabled
+        value.chatter = chatter.enabled
+        return value
+    }
+
+    @objc private func openSettings() {
+        if settingsWindow == nil {
+            let controller = SettingsWindow(preferences: preferences)
+            controller.model.onChange = { [weak self] in self?.applyPreferences($0) }
+            controller.model.onPose = { [weak self] in self?.poseForScreenshot() }
+            settingsWindow = controller
+        }
+        settingsWindow?.model.preferences = preferences
+        settingsWindow?.show()
+    }
+
+    private func applyPreferences(_ input: PetPreferences) {
+        let value = input.normalized
+        if value.selection == "duo" {
+            setDuo(true)
+        } else if let species = Species(rawValue: value.selection) {
+            setDuo(false)
+            if pet.species != species { pet.species = species }
+            defaults.set(species.rawValue, forKey: "species")
+        }
+        value.save(defaults)
+        chatter.enabled = value.chatter
+        chatter.frequency = value.chatFrequency
+        chatter.reminderSound = value.reminderSound
+        pets.forEach {
+            if $0.scale != CGFloat(value.scale) { $0.scale = CGFloat(value.scale) }
+            $0.blocksEnabled = value.blocks
+            $0.musicPlaying = value.music && events.musicPlaying
+            $0.view.coat = $0.species == .cat ? value.catCoat : value.dogCoat
+            $0.view.spriteOpacity = CGFloat(value.opacity)
+            $0.movementSpeed = CGFloat(value.speed)
+            $0.sleepDelay = value.sleepMinutes * 60
+            $0.chasesCursor = value.chasesCursor
+            $0.cornerSide = value.cornerSide
+            $0.cornerOrder = $0 === pet ? 0 : 1
+            $0.cornerMode = value.cornerMode
+        }
+        settingsWindow?.model.preferences = preferences
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -115,7 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let friend = Pet(species: other, scale: pet.scale, ball: ball, x: pet.head.x + pet.size * 0.5)
         friend.acceptsFiles = false
         friend.blocksEnabled = pet.blocksEnabled
-        friend.musicPlaying = events.musicPlaying
+        friend.musicPlaying = events.musicPlaying && musicEnabled
         friend.weather = weather.current?.kind
         friend.onSay = { [unowned friend] text in friend.say(Chatter.plain(text)) }
         friend.view.menuProvider = { [unowned self] in contextMenu() }
@@ -153,6 +232,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func fill(_ menu: NSMenu) {
+        let settings = item("Настройки…", #selector(openSettings))
+        settings.keyEquivalent = ","
+        menu.addItem(settings)
+        menu.addItem(.separator())
+        let corner = item("Сидеть в уголке", #selector(toggleCornerMode))
+        corner.state = preferences.cornerMode ? .on : .off
+        menu.addItem(corner)
         if !pet.held.isEmpty {
             let names = pet.held.map(\.lastPathComponent)
             let title = names.count == 1 ? "Во рту: \(names[0])" : "Во рту: \(names[0]) и ещё \(names.count - 1)"
@@ -169,6 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(item("Новое напоминание…", #selector(newReminderFromMenu)))
         menu.addItem(item(pet.hasBall ? "Убрать мячик" : "Поиграть в мячик", #selector(toggleBall)))
+        menu.addItem(item("Позировать для снимка (30 секунд)", #selector(poseForScreenshot)))
         let upcoming = reminders.upcoming
         if !upcoming.isEmpty {
             let list = NSMenu()
@@ -336,22 +423,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pet.toggleBall()
     }
 
+    @objc private func toggleCornerMode() {
+        var value = preferences
+        value.cornerMode.toggle()
+        applyPreferences(value)
+    }
+
+    @objc private func poseForScreenshot() {
+        pets.forEach { $0.poseForPhoto(duration: 30) }
+    }
+
     @objc private func chooseSpecies(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String else { return }
-        if raw == "duo" {
-            setDuo(true)
-        } else if let species = Species(rawValue: raw) {
-            setDuo(false)
-            pet.species = species
-            defaults.set(raw, forKey: "species")
-        }
-        defaults.set(companion != nil, forKey: "duo")
+        var value = preferences
+        value.selection = raw
+        applyPreferences(value)
     }
 
     @objc private func chooseSize(_ sender: NSMenuItem) {
         guard let scale = sender.representedObject as? CGFloat else { return }
-        pets.forEach { $0.scale = scale }
-        defaults.set(Double(scale), forKey: "scale48")
+        var value = preferences
+        value.scale = Double(scale)
+        applyPreferences(value)
     }
 }
 

@@ -206,6 +206,12 @@ final class Chatter {
     weak var friend: Pet?
     /// Погода за окном — к болтовне добавляются фразы про неё.
     var weather: Weather.Now?
+    var reminderSound = true
+    var frequency: Double = 1 {
+        didSet {
+            if frequency != oldValue { nextAt = Date().addingTimeInterval(.random(in: 180...420) / frequency) }
+        }
+    }
 
     var enabled: Bool {
         didSet { defaults.set(enabled, forKey: "chatter") }
@@ -262,7 +268,7 @@ final class Chatter {
         text.append(NSAttributedString(string: lead, attributes: Self.keys))
         text.append(NSAttributedString(string: rest, attributes: Self.body))
         pet.say(text)
-        nextAt = Date().addingTimeInterval(.random(in: 180...420))
+        nextAt = Date().addingTimeInterval(.random(in: 180...420) / frequency)
     }
 
     /// Напоминание говорится, даже если болтовня выключена, и висит до клика по пузырю.
@@ -276,7 +282,7 @@ final class Chatter {
         }
         pet.say(s, sticky: true)
         pet.callForAttention()
-        NSSound(named: "Glass")?.play()
+        if reminderSound { NSSound(named: "Glass")?.play() }
         nextNudge = Date().addingTimeInterval(20)
     }
 
@@ -318,7 +324,7 @@ final class Chatter {
         } else {
             let speaker = friend.flatMap { Bool.random() && !$0.isSpeaking && !$0.isSleeping ? $0 : nil } ?? pet
             speaker.say(Self.plain(Lines.phrase(speaker.species, hour: hour, weather: weather)))
-            nextAt = Date().addingTimeInterval(.random(in: 180...420))
+            nextAt = Date().addingTimeInterval(.random(in: 180...420) / frequency)
         }
     }
 

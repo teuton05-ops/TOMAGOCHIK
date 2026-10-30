@@ -44,7 +44,8 @@ struct Animation {
 final class Pet {
     enum State { case idle, walking, held, airborne, climbing, sleeping }
 
-    /// Спрайты 48×48; scale — сколько точек экрана на пиксель спрайта.
+    /// Логический размер — 48 точек; текстуры 128×128 нарезаются по высоте листа.
+    /// scale меняет размер питомца на экране независимо от разрешения рисунка.
     static let spriteSize: CGFloat = 48
     /// Скорость ходьбы в пикселях спрайта в секунду: 2 px за кадр ходьбы, чтобы лапы не скользили.
     static let walkSpeed: CGFloat = 2 / 0.14
@@ -56,8 +57,29 @@ final class Pet {
 
     let window: NSPanel
     let view: PetView
-    var species: Species { didSet { loadAnimations() } }
+    var species: Species { didSet { view.clearAppearanceCache(); loadAnimations() } }
     var scale: CGFloat { didSet { resize() } }
+    var movementSpeed: CGFloat = 1
+    private var walkingSpeed: CGFloat { Pet.walkSpeed * movementSpeed }
+    var sleepDelay: TimeInterval = Pet.sleepAfter
+    var chasesCursor = true {
+        didSet { if !chasesCursor { stopChasing() } }
+    }
+    var cornerSide = "right"
+    var cornerOrder = 0
+    var cornerMode = false {
+        didSet {
+            guard cornerMode != oldValue else { return }
+            if cornerMode {
+                pickUp() // Завершаем игры, прятки и перенос предметов.
+                rest(for: 1)
+                parkInCorner()
+                window.setFrameOrigin(origin)
+            } else if state != .held {
+                rest(for: 1)
+            }
+        }
+    }
 
     private var idle: Animation!
     private var walk: Animation!
@@ -81,6 +103,7 @@ final class Pet {
     private var dance: Animation!
     /// Сидит, подмигивает и машет лапкой.
     private var pose: Animation!
+    private var photoPose = PhotoPose()
 
     /// Разовое действие на месте: кадры по очереди, в конце — then. Пока идёт, питомец стоит.
     private struct Act {
@@ -334,6 +357,7 @@ final class Pet {
 
     /// Клик: на стене — спрыгивает, спящий — просыпается, на ногах — радостно подпрыгивает.
     func poke() {
+        if cornerMode { onPetted?(); return }
         if hide?.until != nil {
             comeOut(found: true)
             return
@@ -764,6 +788,7 @@ final class Pet {
     }
 
     private func catchBallIfClose(_ now: Date) {
+        guard !cornerMode else { return }
         guard ball.isActive, !ball.isGrabbed, ball.carrier == nil, now >= ignoreBallUntil,
               now.timeIntervalSince(ball.touchedAt) < 25,  // наигрался — мимо лежащего мячика проходит
               [.idle, .walking, .airborne].contains(state),
@@ -818,7 +843,7 @@ final class Pet {
             if dy < -size * 0.5 {
                 state = .walking
                 walkingOff = true
-                origin.x += direction * Pet.walkSpeed * px * dt
+                origin.x += direction * walkingSpeed * px * dt
                 return true
             }
             let ballFloor = ball.position.y - ball.radius
@@ -844,7 +869,7 @@ final class Pet {
     /// Шаг бегом к x по своей кромке; false — упёрся в край.
     private func runStep(toward x: CGFloat, on p: Platform, _ dt: CGFloat, speed: CGFloat? = nil) -> Bool {
         let speed = speed ?? Pet.runFactor
-        let step = (x > centerX ? 1 : -1) * Pet.walkSpeed * speed * px * dt
+        let step = (x > centerX ? 1 : -1) * walkingSpeed * speed * px * dt
         let edge = size * 0.2
         guard centerX + step <= p.x1 - edge && centerX + step >= p.x0 + edge else { return false }
         if state != .walking {
@@ -868,10 +893,10 @@ final class Pet {
     }
 
     /// Делают скриншот — садится, машет лапкой и подмигивает.
-    func poseForPhoto() {
-        guard state == .idle || state == .walking, !paused else { return }
+    func poseForPhoto(duration: TimeInterval = 5) {
+        photoPose.request(at: Date(), duration: duration)
+        if state == .sleeping { wake(greet: false) }
         if ball.carrier === self { ball.carrier = nil }
-        perform(Act(frames: looped(pose, for: 2.5), calm: true) { [unowned self] in rest(for: 1) })
     }
 
     // MARK: - Вдвоём
@@ -1129,7 +1154,7 @@ final class Pet {
             return
         }
         if now < climbPauseUntil { return }
-        origin.y += climbDir * Pet.walkSpeed * px * 0.8 * dt
+        origin.y += climbDir * walkingSpeed * px * 0.8 * dt
         if climbDir > 0 && origin.y >= climbTarget {
             origin.y = climbTarget
             climbDir = 0
@@ -1151,6 +1176,18 @@ final class Pet {
 
     // MARK: - Кадр
 
+    private func parkInCorner() {
+        stopChasing()
+        act = nil
+        state = .idle
+        velocity = .zero
+        napUntil = nil
+        walkingOff = false
+        supportID = 0
+        direction = cornerSide == "left" ? 1 : -1
+        origin = CornerSeat.origin(in: screenArea, size: size, order: cornerOrder, left: cornerSide == "left")
+    }
+
     private func tick() {
         let now = Date()
         let dt = CGFloat(min(now.timeIntervalSince(lastTick), 0.1))
@@ -1161,118 +1198,130 @@ final class Pet {
         lookAt = nil
         running = false
 
-        switch state {
-        case .idle, .walking:
-            if hide != nil {
-                hideStep(now, dt)  // за краем экрана опоры под лапами нет — это нормально
-                break
-            }
-            ride(dt)
-            guard let p = support() else {
-                // Сошли с края или опору убрали из-под лап: окно закрыли, свернули, перекрыли, страницу прокрутили
-                if !walkingOff && state == .idle { emotes.show(.puzzled) }
-                stayUntil = .distantPast
-                launch(CGVector(dx: state == .walking ? direction * Pet.walkSpeed * px : 0, dy: 0))
-                break
-            }
-            supportID = p.windowID
-            if holdOn(now, dt) { break }
-            if paused {
-                act = nil
-                if state != .idle {
-                    state = .idle
-                    stateTime = 0
+        if cornerMode && state != .held {
+            parkInCorner()
+        } else {
+            switch state {
+            case .idle, .walking:
+                if hide != nil {
+                    hideStep(now, dt)  // за краем экрана опоры под лапами нет — это нормально
+                    break
                 }
-                faceMouse(now)
-                break
-            }
-            if enjoyPetting(now) { break }
-            if let current = act {
-                if now >= current.end {
+                ride(dt)
+                guard let p = support() else {
+                    // Сошли с края или опору убрали из-под лап: окно закрыли, свернули, перекрыли, страницу прокрутили
+                    if !walkingOff && state == .idle { emotes.show(.puzzled) }
+                    stayUntil = .distantPast
+                    launch(CGVector(dx: state == .walking ? direction * walkingSpeed * px : 0, dy: 0))
+                    break
+                }
+                supportID = p.windowID
+                if photoPose.isActive(at: now) {
+                    stopChasing()
                     act = nil
-                    current.then?()
+                    walkingOff = false
+                    state = .idle
+                    stateUntil = now.addingTimeInterval(1)
+                    break
                 }
-                break
-            }
-            if trashTrip != nil {
-                tripToTrash(on: p, now, dt)
-                break
-            }
-            if game != nil {
-                playGame(on: p, now, dt)
-                break
-            }
-            if butterfly.isActive && butterfly.target != nil {
-                watchButterfly(now)
-                break
-            }
-            if playBall(on: p, now, dt) { break }
-            if musicPlaying && now >= nextDance && !chasing {
-                danceNow()
-                break
-            }
-            if !isReminding && Pet.userIdleSeconds > Pet.sleepAfter {
-                stopChasing()
-                state = .sleeping
-                stateTime = 0
-                break
-            }
-            if chasing || startChase(now, dt) {
-                chase(on: p, now, dt)
-                break
-            }
-            if state == .idle {
-                faceMouse(now)
-                maybeSwipe(now, dt)
-                if act == nil && now >= stateUntil { decideAfterRest() }
-                break
-            }
-            let step = direction * Pet.walkSpeed * px * dt
-            let edge = size * 0.2
-            let atEdge = (direction > 0 && centerX + step > p.x1 - edge) || (direction < 0 && centerX + step < p.x0 + edge)
-            if atEdge && !walkingOff {
-                reachEdge(of: p)
-            } else {
-                origin.x += step
-                if !staying, Double.random(in: 0..<1) < 0.25 * Double(dt), let (t, x) = jumpTarget(toward: direction, from: p) {
-                    jump(to: t, x: x)
-                } else if now >= stateUntil {
-                    rest(for: .random(in: 2...6))
+                if holdOn(now, dt) { break }
+                if paused {
+                    act = nil
+                    if state != .idle {
+                        state = .idle
+                        stateTime = 0
+                    }
+                    faceMouse(now)
+                    break
+                }
+                if enjoyPetting(now) { break }
+                if let current = act {
+                    if now >= current.end {
+                        act = nil
+                        current.then?()
+                    }
+                    break
+                }
+                if trashTrip != nil {
+                    tripToTrash(on: p, now, dt)
+                    break
+                }
+                if game != nil {
+                    playGame(on: p, now, dt)
+                    break
+                }
+                if butterfly.isActive && butterfly.target != nil {
+                    watchButterfly(now)
+                    break
+                }
+                if playBall(on: p, now, dt) { break }
+                if musicPlaying && now >= nextDance && !chasing {
+                    danceNow()
+                    break
+                }
+                if !isReminding && sleepDelay > 0 && Pet.userIdleSeconds > sleepDelay {
+                    stopChasing()
+                    state = .sleeping
+                    stateTime = 0
+                    break
+                }
+                if chasesCursor && (chasing || startChase(now, dt)) {
+                    chase(on: p, now, dt)
+                    break
+                }
+                if state == .idle {
+                    faceMouse(now)
+                    maybeSwipe(now, dt)
+                    if act == nil && now >= stateUntil { decideAfterRest() }
+                    break
+                }
+                let step = direction * walkingSpeed * px * dt
+                let edge = size * 0.2
+                let atEdge = (direction > 0 && centerX + step > p.x1 - edge) || (direction < 0 && centerX + step < p.x0 + edge)
+                if atEdge && !walkingOff {
+                    reachEdge(of: p)
+                } else {
+                    origin.x += step
+                    if !staying, Double.random(in: 0..<1) < 0.25 * Double(dt), let (t, x) = jumpTarget(toward: direction, from: p) {
+                        jump(to: t, x: x)
+                    } else if now >= stateUntil {
+                        rest(for: .random(in: 2...6))
+                    }
+                }
+            case .sleeping:
+                ride(dt)
+                if support() == nil {
+                    launch(.zero)  // опору убрали — падает, просыпаясь
+                } else if let napUntil {
+                    if now >= napUntil { wake(greet: false) }  // ночная дрёма: мышь не будит
+                } else if Pet.userIdleSeconds < 2 {
+                    wake(greet: true)
+                }
+            case .held:
+                dangle(dt)
+            case .climbing:
+                if !paused { climb(now, dt) }
+            case .airborne:
+                let prevY = origin.y
+                velocity.dy -= Pet.gravity * unit * dt
+                origin.x += velocity.dx * dt
+                origin.y += velocity.dy * dt
+                keepOnScreens()
+                if curled { spin -= velocity.dx / (size * 0.5) * dt }  // катится клубком
+                if velocity.dy <= 0 {
+                    reachForButterfly()
+                    let landing = world.platforms
+                        .filter { $0.holds(centerX) && prevY >= $0.y - 0.5 && origin.y <= $0.y }
+                        .max { $0.y < $1.y }
+                    if let landing {
+                        land(on: landing, impact: -velocity.dy)
+                    } else if let floor = floorBelow(), origin.y < floor.y {
+                        land(on: floor, impact: -velocity.dy)  // страховка: пролетели сквозь пол на большом шаге или окно уехало
+                    }
                 }
             }
-        case .sleeping:
-            ride(dt)
-            if support() == nil {
-                launch(.zero)  // опору убрали — падает, просыпаясь
-            } else if let napUntil {
-                if now >= napUntil { wake(greet: false) }  // ночная дрёма: мышь не будит
-            } else if Pet.userIdleSeconds < 2 {
-                wake(greet: true)
-            }
-        case .held:
-            dangle(dt)
-        case .climbing:
-            if !paused { climb(now, dt) }
-        case .airborne:
-            let prevY = origin.y
-            velocity.dy -= Pet.gravity * unit * dt
-            origin.x += velocity.dx * dt
-            origin.y += velocity.dy * dt
-            keepOnScreens()
-            if curled { spin -= velocity.dx / (size * 0.5) * dt }  // катится клубком
-            if velocity.dy <= 0 {
-                reachForButterfly()
-                let landing = world.platforms
-                    .filter { $0.holds(centerX) && prevY >= $0.y - 0.5 && origin.y <= $0.y }
-                    .max { $0.y < $1.y }
-                if let landing {
-                    land(on: landing, impact: -velocity.dy)
-                } else if let floor = floorBelow(), origin.y < floor.y {
-                    land(on: floor, impact: -velocity.dy)  // страховка: пролетели сквозь пол на большом шаге или окно уехало
-                }
-            }
-        }
 
+        }
         if state != .held {
             window.setFrameOrigin(origin)
         }
@@ -1289,7 +1338,7 @@ final class Pet {
         var tilt: CGFloat = 0, pivotY: CGFloat = 0.6, stretch: CGFloat = 1
         switch state {
         case .walking:
-            image = walk.frame(at: stateTime * Double(chasing || running ? Pet.runFactor : 1))
+            image = walk.frame(at: stateTime * Double(movementSpeed) * Double(chasing || running ? Pet.runFactor : 1))
         case .held:
             image = hang.frame(at: stateTime)
             tilt = swing
@@ -1301,7 +1350,11 @@ final class Pet {
             image = idle.frames[2]  // зажмурился
             stretch = 1 + min(abs(velocity.dy) / (4000 * unit), 0.12)  // в полёте вытягивается по ходу движения
         case .idle:
-            if let act {
+            if photoPose.isActive(at: now) {
+                image = pose.frame(at: now.timeIntervalSince(photoPose.startedAt))
+            } else if cornerMode {
+                image = sit.frame(at: stateTime)
+            } else if let act {
                 image = act.frame(at: now)
                 if let sway = act.sway {
                     tilt = sin(now.timeIntervalSince(act.start) * sway.speed) * sway.amount
@@ -1321,7 +1374,7 @@ final class Pet {
                 image = idleFrame(now)
             }
         case .climbing:
-            image = climbDir == 0 || paused ? idle.frame(at: stateTime) : walk.frame(at: stateTime)
+            image = climbDir == 0 || paused ? idle.frame(at: stateTime) : walk.frame(at: stateTime * Double(movementSpeed))
             // Поворот на четверть: лапы к стене. Справа носом вверх — без отражения, вниз — отражённый; слева наоборот.
             facingLeft = (wallSide > 0) == climbHeadDown
             tilt = wallSide * .pi / 2
@@ -1419,6 +1472,7 @@ final class Pet {
 
     /// Что-то выбросили (или просто захотелось) — бежит к Корзине в Доке.
     func goToTrash() {
+        guard !cornerMode else { return }
         guard state == .idle || state == .walking, hide == nil, game == nil, !paused, trashTrip == nil else { return }
         stopChasing()
         act = nil
@@ -1433,7 +1487,7 @@ final class Pet {
                 state = .walking
                 walkingOff = true
                 direction = x > centerX ? 1 : -1
-                origin.x += direction * Pet.walkSpeed * px * dt
+                origin.x += direction * walkingSpeed * px * dt
             }
             return
         }
@@ -1514,7 +1568,7 @@ final class Pet {
         guard var h = hide else { return }
         guard let until = h.until else {
             // Бежит к укрытию, не глядя на края кромки
-            let dx = h.x - origin.x, step = Pet.walkSpeed * 1.6 * px * dt
+            let dx = h.x - origin.x, step = walkingSpeed * 1.6 * px * dt
             if abs(dx) > step {
                 if state != .walking {
                     state = .walking
@@ -1665,7 +1719,7 @@ final class Pet {
             rest(for: .random(in: 1...2.5))
             return
         }
-        let step = (dx > 0 ? 1 : -1) * Pet.walkSpeed * Pet.runFactor * px * dt
+        let step = (dx > 0 ? 1 : -1) * walkingSpeed * Pet.runFactor * px * dt
         let edge = size * 0.2
         let blocked = centerX + step > p.x1 - edge || centerX + step < p.x0 + edge
         if abs(dx) > size * 0.35 && !blocked {

@@ -1,7 +1,7 @@
-"""Рыжий котик, 48×48, смотрит вправо. Позы — в клетках разметки 32×32, мордочка — в пикселях. Запуск: python3 art/cat.py"""
+"""Рыжий котик, 128×128, смотрит вправо. Позы — в клетках разметки 32×32, мимика — в отдельной разметке 48×48. Запуск: python3 art/cat.py"""
 from pixel import (BALANCE, CROUCH, DANCE, DIG, GAZES, HANG_BOB, HANG_LEGS, OUTLINE, SIT_FAR, SIT_HEAD, SIT_NEAR, SLEEP_BOBS,
                    SQUAT, STAND_FAR, STAND_NEAR, STRETCH_FAR, STRETCH_HEAD, STRETCH_NEAR, SWIPE_NEAR, SWIPES, WALK_LEGS,
-                   WAVES, S, Layer, Sprite, export, legs, zzz)
+                   WAVES, S, Layer, Sprite, export, legs, sitting_body, zzz)
 
 FUR = (240, 160, 75, 255)
 FUR_FAR = (204, 126, 56, 255)
@@ -11,7 +11,8 @@ WHITE_FAR = (224, 204, 184, 255)
 PINK = (242, 139, 154, 255)
 BLUSH = (247, 186, 190, 255)
 SHINE = (255, 255, 255, 255)
-SHINE_SOFT = (255, 255, 255, 150)
+IRIS = (103, 145, 96, 255)
+BROW = (170, 96, 42, 255)
 NOSE = (214, 104, 122, 255)
 THROAT = (120, 44, 52, 255)
 WHISKER = (214, 196, 178, 255)
@@ -53,20 +54,28 @@ STRIPES = {"stand": [(9, 18), (12, 18), (15, 18)], "sit": [(7, 22), (10, 21), (1
 
 def stripe(s, x, y):
     """Полоска на шерсти: клетка разметки → короткий клин в пикселях."""
-    nx, ny = round(x * S), round(y * S)
-    s.dots([(nx, ny), (nx + 1, ny), (nx, ny + 1), (nx + 1, ny + 1), (nx, ny + 2)], STRIPE)
+    mark = Layer(STRIPE)
+    mark.poly([(x, y), (x + 1.1, y), (x + 0.8, y + 2.5), (x + 0.25, y + 3)])
+    s.draw(mark, outline=False)
 
 
 def eye(s, ex, ey, kind):
-    """Глаз 3×4 в пикселях: открыт (с бликами), закрыт «‿», доволен «^»."""
+    """Глаза заново рисуются кривыми в полном разрешении, с радужкой и бликами."""
+    x, y = ex / 1.5, ey / 1.5
     if kind == "closed":
-        s.dots([(ex, ey + 2), (ex + 1, ey + 3), (ex + 2, ey + 2)], OUTLINE)
+        s.line([(x - .15, y + 1.4), (x + .55, y + 1.9), (x + 1.4, y + 1.8),
+                (x + 1.95, y + 1.3)], OUTLINE, .35)
     elif kind == "happy":
-        s.dots([(ex - 1, ey + 3), (ex, ey + 2), (ex + 1, ey + 1), (ex + 2, ey + 2), (ex + 3, ey + 3)], OUTLINE)
+        s.line([(x - .2, y + 1.9), (x + .3, y + .9), (x + .9, y + .6),
+                (x + 1.5, y + 1), (x + 2.1, y + 1.9)], OUTLINE, .35)
     else:
-        s.dots([(ex + i, ey + j) for i in range(3) for j in range(4)], OUTLINE)
-        s.put(ex, ey, SHINE)
-        s.put(ex + 2, ey + 2, SHINE_SOFT)
+        s.oval((x - .15, y - .1, x + 1.9, y + 2.65), OUTLINE)
+        s.oval((x + .25, y + .7, x + 1.6, y + 2.25), IRIS)
+        s.oval((x + .6, y + .35, x + 1.2, y + 2.1), OUTLINE)
+        s.oval((x + .15, y + .15, x + .85, y + .85), SHINE)
+        s.oval((x + 1.15, y + 1.65, x + 1.5, y + 2), SHINE)
+        s.line([(x, y - .55), (x + 1.3, y - .7)], BROW, .22)
+
 
 
 def frame(near=STAND_NEAR, far=STAND_FAR, bob=0, tail=0, blink=False, gaze=(0, 0),
@@ -84,12 +93,11 @@ def frame(near=STAND_NEAR, far=STAND_FAR, bob=0, tail=0, blink=False, gaze=(0, 0
     far_legs = Layer(FUR_FAR)
     far_paws = legs(far_legs, far, top)
     s.draw(far_legs)
-    s.dots(far_paws, WHITE_FAR)
+    s.paws(far_paws, WHITE_FAR)
 
     body = Layer(FUR)
     if pose == "sit":
-        body.rrect(5, 21, 14, 30, r=3.5)  # «окорочок» на полу
-        body.rrect(11, 15, 20, 27, r=3)  # грудь торчком
+        sitting_body(body)
     elif pose == "stretch":
         body.rrect(5, 14, 13, 22, r=3.5)  # зад кверху
         body.rrect(11, 18, 22, 26, r=3)  # грудь у пола
@@ -103,8 +111,8 @@ def frame(near=STAND_NEAR, far=STAND_FAR, bob=0, tail=0, blink=False, gaze=(0, 0
     for k in (-1, 3):
         x, y = tail[k]
         cx, cy = round((x + 1) * S), round((y + 1 + y0) * S)
-        s.dots([(cx - 1, cy - 1), (cx, cy - 1), (cx - 1, cy), (cx, cy)], STRIPE)
-    s.dots(near_paws, WHITE)
+        s.oval(((cx - 2) / S, (cy - 2) / S, (cx + 2) / S, (cy + 2) / S), STRIPE)
+    s.paws(near_paws, WHITE)
     if pose == "sit":
         for x in (11, 12, 13):
             s.cell(x, 30, WHITE)  # задняя лапка из-под окорочка
@@ -127,24 +135,38 @@ def frame(near=STAND_NEAR, far=STAND_FAR, bob=0, tail=0, blink=False, gaze=(0, 0
 
     # Дальше — мордочка в пикселях; голова занимает x 25..42, y 16..30, середина между 33 и 34
     def dots(points, c):
-        s.dots(points, c, dy=hn)
+        s.details(points, c, dy=hn * 1.5 / S)
 
-    dots([(33, 17), (34, 17), (33, 18), (34, 18), (29, 17), (30, 17), (29, 18), (37, 17), (38, 17), (38, 18)], STRIPE)
+    forehead = Layer(STRIPE)
+    for x, length in ((19.6, 1.3), (22.3, 1.9), (25.3, 1.3)):
+        forehead.poly([(x, 11.3 + hy), (x + .9, 11.3 + hy),
+                       (x + .65, 11.3 + length + hy), (x + .3, 11.6 + length + hy)])
+    s.draw(forehead, outline=False)
     gx, gy = gaze
     for ex, side in ((28 + gx, "left"), (37 + gx, "right")):
         kind = "happy" if eyes == "wink" and side == "right" else "open" if eyes == "wink" else eyes
-        eye(s, ex, 21 + gy + hn, kind)
-    dots([(26, 26), (27, 26), (40, 26), (41, 26)], BLUSH)
-    dots([(32, 25), (33, 25), (34, 25), (35, 25)], PINK)
-    dots([(33, 26), (34, 26)], NOSE)
+        eye(s, ex, 21 + gy + hn * 1.5 / S, kind)
+    for x in (17.5, 26.5):
+        s.oval((x, 17 + hy, x + 1.3, 17.6 + hy), BLUSH)
+    nose = Layer(PINK)
+    nose.poly([(21.5, 16.7 + hy), (23.7, 16.7 + hy), (22.6, 18 + hy)])
+    s.draw(nose, outline=False)
+    s.line([(21.8, 16.8 + hy), (22.7, 16.8 + hy)], (255, 190, 190, 255), .2)
     if mouth:
         dots([(32, 27), (33, 27), (34, 27), (35, 27), (31, 28), (36, 28), (31, 29), (36, 29), (32, 30), (33, 30), (34, 30), (35, 30)], OUTLINE)
         dots([(32, 28), (33, 28), (34, 28), (35, 28)], THROAT)
         dots([(32, 29), (33, 29), (34, 29), (35, 29)], PINK)
     else:
-        dots([(31, 29), (32, 29), (33, 29), (34, 29), (35, 29), (36, 29), (32, 30), (33, 30), (34, 30), (35, 30)], CREAM)
-        dots([(31, 27), (33, 27), (34, 27), (36, 27), (32, 28), (35, 28)], OUTLINE)
-    dots([(45, 26), (46, 25), (47, 25), (45, 28), (46, 28), (47, 29)], WHISKER)  # усы торчат за щёку
+        s.oval((20.6, 17.8 + hy, 24.5, 20 + hy), CREAM)
+        s.line([(22.6, 17.7 + hy), (22.6, 18.4 + hy)], OUTLINE)
+        s.line([(20.9, 18.1 + hy), (21.4, 18.7 + hy), (22, 18.7 + hy),
+                (22.6, 18.3 + hy), (23.2, 18.7 + hy), (23.8, 18.7 + hy), (24.3, 18.1 + hy)], OUTLINE)
+    for start, end in (((18.1, 18.1), (15.9, 17.6)), ((18.1, 18.8), (15.7, 19.2)),
+                       ((28.7, 18.1), (31.3, 17.5)), ((28.7, 18.8), (31.5, 19.4))):
+        s.line([(start[0], start[1] + hy), (end[0], end[1] + hy)], WHISKER, .2)
+    for x in (18.5, 26.7):
+        s.line([(x, 17.8 + hy), (x + .15, 17.8 + hy)], STRIPE, .2)
+        s.line([(x + .5, 18.3 + hy), (x + .65, 18.3 + hy)], STRIPE, .2)
 
     if limb:
         paw = Layer(FUR)
@@ -154,6 +176,9 @@ def frame(near=STAND_NEAR, far=STAND_FAR, bob=0, tail=0, blink=False, gaze=(0, 0
         pad = Layer(WHITE)
         pad.disc(x + 1, y + 1, 1)
         s.draw(pad, outline=False)
+        s.oval((x + .5, y + .6, x + 1.45, y + 1.4), PINK)
+        for tx in (x + .35, x + 1, x + 1.6):
+            s.oval((tx, y + .15, tx + .3, y + .45), PINK)
     return s
 
 
@@ -234,8 +259,8 @@ def curl():
     s.cell(23, 8.5, PINK)
     for ex in (25, 33):
         eye(s, ex, 17, "closed")
-    s.dots([(23, 22), (24, 22), (35, 22), (36, 22)], BLUSH)
-    s.dots([(29, 22), (30, 22)], PINK)
+    s.details([(23, 22), (24, 22), (35, 22), (36, 22)], BLUSH)
+    s.details([(29, 22), (30, 22)], PINK)
     for x in (13, 14, 17, 18):
         s.cell(x, 23, WHITE)
     return s
